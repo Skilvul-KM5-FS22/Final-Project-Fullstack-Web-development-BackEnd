@@ -2,13 +2,92 @@ const Video = require("../models/video");
 const Buku = require("../models/buku");
 const Uang = require("../models/midtrans");
 const Donasi = require("../models/donasi");
-const R2 = require("aws-sdk");
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const cloudinary = require("../utils/cloudinary");
 // const upload = require("../utils/multer");
 const mongoose = require("mongoose");
 const cron = require("node-cron");
 const midtransClient = require("midtrans-client");
-const ObjectId = mongoose.Types.ObjectId;
+
+const createTransactionParameters = (orderId, amount, fullName, email, phone) => {
+  return {
+    transaction_details: {
+      order_id: orderId,
+      gross_amount: amount,
+    },
+    credit_card: {
+      secure: true,
+    },
+    customer_details: {
+      first_name: fullName,
+      email,
+      phone,
+    },
+  };
+};
+
+const generateOrderId = (userId) => {
+  let today = new Date();
+  let dd = String(today.getDate()).padStart(2, "0");
+  let mm = String(today.getMonth() + 1).padStart(2, "0");
+  let yyyy = today.getFullYear();
+  let hours = String(today.getHours()).padStart(2, "0");
+  let minutes = String(today.getMinutes()).padStart(2, "0");
+  let seconds = String(today.getSeconds()).padStart(2, "0");
+
+  return `${dd}${mm}${yyyy}${hours}${minutes}${seconds}${userId.slice(-4)}`;
+};
+
+const scheduleCronJob = async (savedUang) => {
+  try {
+    const cronJob = cron.schedule("*/30 * * * * *", async () => {
+      console.log("Cron job is running...");
+      try {
+        const updatedTransactionStatus = await getTransactionStatusFromMidtrans(savedUang.order_id);
+        console.log("Updated transaction status from Midtrans:", updatedTransactionStatus);
+
+        savedUang.transaction_status = updatedTransactionStatus.transaction_status;
+        savedUang.previous_transaction_id = savedUang.transaction_id;
+        savedUang.transaction_id = updatedTransactionStatus.transaction_id;
+        let now = new Date();
+        savedUang.last_updated_at = now.toLocaleString("id-ID", {
+          timeZone: "Asia/Jakarta",
+          hour12: false,
+        });
+
+        await savedUang.save();
+
+        console.log(`Transaction status updated: ${savedUang.transaction_status}`);
+
+        // Stop the cron job if the transaction is complete
+        if (updatedTransactionStatus.transaction_status === 'capture' || updatedTransactionStatus.transaction_status === 'settlement') {
+          cronJob.stop();
+          console.log('Transaction is complete, stopping cron job.');
+        }
+      } catch (transactionError) {
+        console.error("Error updating transaction status:", transactionError.message);
+      }
+    });
+  } catch (cronError) {
+    console.error("Error scheduling cron job:", cronError.message);
+  }
+};
+
+// Controller untuk mendapatkan status transaksi dari Midtrans
+const getTransactionStatusFromMidtrans = async (order_id) => {
+  let core = new midtransClient.CoreApi({
+    isProduction: false,
+    serverKey: process.env.SERVER_KEY,
+  });
+
+  try {
+    const transactionStatus = await core.transaction.status(order_id);
+    return transactionStatus;
+  } catch (error) {
+    console.error("Error getting transaction status from Midtrans:", error.message);
+    throw error;
+  }
+};
 
 module.exports = {
   donasiVideo: async (req, res) => {
@@ -79,7 +158,9 @@ module.exports = {
 
     try {
       const publicBucketUrl = process.env.R2_PUBLIC_BUCKET_URL;
-      const D2 = new R2.S3({
+
+      // Initialize S3 client
+      const s3Client = new S3Client({
         region: "auto",
         endpoint: process.env.R2_ENDPOINT,
         credentials: {
@@ -93,19 +174,19 @@ module.exports = {
       const imgKey = Math.round(Math.random() * 99999999999999).toString();
 
       // Promises for book and image uploads
-      const uploadBookPromise = D2.upload({
-        Body: req.files.book_url[0].buffer,
+      const uploadBookPromise = s3Client.send(new PutObjectCommand({
         Bucket: process.env.R2_BUCKET_NAME,
         Key: bookKey,
+        Body: req.files.book_url[0].buffer,
         ContentType: req.files.book_url[0].mimetype,
-      }).promise();
+      }));
 
-      const uploadImgPromise = D2.upload({
-        Body: req.files.img_url[0].buffer,
+      const uploadImgPromise = s3Client.send(new PutObjectCommand({
         Bucket: process.env.R2_BUCKET_NAME,
         Key: imgKey,
+        Body: req.files.img_url[0].buffer,
         ContentType: req.files.img_url[0].mimetype,
-      }).promise();
+      }));
 
       // Wait for both uploads to complete
       const [bookUploadResult, imgUploadResult] = await Promise.all([
@@ -152,7 +233,7 @@ module.exports = {
         data: buku,
       });
     } catch (error) {
-      console.log(error);
+      console.error(error);
       // Respond with an error message and data
       res.json({
         message: "Book donation failed",
@@ -160,102 +241,93 @@ module.exports = {
       });
     }
   },
+  
 
   donasiUang: async (req, res) => {
-    const { id } = req.params;
-  
     try {
+      const { id } = req.params;
       const { full_name, email, phone, donation_amount, note } = req.body;
-  
+
       if (!full_name || !email || !phone || !donation_amount) {
         return res.status(400).json({
           success: false,
           message: "Terdapat kolom yang kosong dalam permintaan.",
         });
       }
-  
+
+      const orderId = generateOrderId(id);
+
+      let snap = new midtransClient.Snap({
+        isProduction: false,
+        serverKey: process.env.SERVER_KEY,
+      });
+
+      let parameter = createTransactionParameters(orderId, donation_amount, full_name, email, phone);
+
+      const transaction = await snap.createTransaction(parameter);
+
       const uang = new Uang({
-        order_id: new ObjectId(), // Membuat ObjectId baru untuk order_id
+        order_id: parameter.transaction_details.order_id,
         full_name,
         email,
         phone,
         donation_amount,
         note,
-        transaction_id: null,
-        response_midtrans: null,
+        transaction_id: transaction.transaction_id,
         transaction_status: "Butuh update",
+        donaturId: id,
       });
-  
+
       const savedUang = await uang.save();
+
       console.log("Berhasil menyimpan data donasi uang:", savedUang);
-  
+
       const donasi = new Donasi({
         uangID: savedUang._id,
         userID: id,
       });
-  
+
       const savedDonasi = await donasi.save();
-  
-      savedUang.donaturId = savedDonasi._id;
-      await savedUang.save();
-  
-      let snap = new midtransClient.Snap({
-        isProduction: false,
-        serverKey: process.env.SERVER_KEY,
-      });
-  
-      let parameter = {
-        transaction_details: {
-          order_id: savedUang._id.toString(),
-          gross_amount: donation_amount,
-        },
-        credit_card: {
-          secure: true,
-        },
-        customer_details: {
-          first_name: full_name,
-          email,
-          phone,
-        },
-      };
-  
-      const transaction = await snap.createTransaction(parameter);
-  
-      savedUang.transaction_id = transaction.transaction_id;
-      savedUang.response_midtrans = JSON.stringify(transaction);
-      await savedUang.save();
-  
+
       console.log("Transaction ID:", transaction.transaction_id);
-  
-      // Menggunakan try-catch dan await untuk menangani error dan memberhentikan cron job jika terjadi kesalahan
-      try {
-        const cronJob = await cron.schedule('0 * * * *', async () => {
-          console.log('Cron job is running...');
-          const updatedTransactionStatus = await getTransactionStatusFromMidtrans(savedUang.transaction_id);
-  
-          savedUang.transaction_status = updatedTransactionStatus.status;
-          savedUang.previous_transaction_id = savedUang.transaction_id;
-          savedUang.transaction_id = updatedTransactionStatus.transaction_id;
-          let now = new Date();
-          savedUang.last_updated_at = now.toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', hour12: false });
-  
-          await savedUang.save();
-  
-          console.log(`Transaction status updated: ${savedUang.transaction_status}`);
-        });
-      } catch (cronError) {
-        console.error('Error scheduling cron job:', cronError.message);
-      }
-  
-      return res.status(201).json({
+
+      console.log("Before scheduling cron job...");
+      await scheduleCronJob(savedUang);
+
+      res.status(201).json({
         success: true,
         message: "Berhasil melakukan charge transaksi!",
         data: transaction,
       });
     } catch (error) {
-      return res.status(500).json({ success: false, message: error.message });
+      console.error("Error in donasiUang:", error.message);
+      res.status(500).json({ success: false, message: error.message });
     }
-  },  
+  },
+
+  getTransactionStatus: async (req, res) => {
+    try {
+      const { order_id } = req.params;
+
+      if (!order_id) {
+        return res.status(400).json({
+          success: false,
+          message: "No order_id in the request.",
+        });
+      }
+
+      const transactionStatus = await getTransactionStatusFromMidtrans(order_id);
+
+      res.status(200).json({
+        success: true,
+        message: "Transaction status retrieved successfully!",
+        data: transactionStatus,
+      });
+    } catch (error) {
+      console.error("Error in getTransactionStatus:", error.message);
+      res.status(500).json({ success: false, message: error.message });
+    }
+  },
 
   totalDonasiByUser: async (req, res) => {
     try {
@@ -337,23 +409,25 @@ module.exports = {
         },
         {
           $lookup: {
-            from: 'transactions',  // Ganti dengan nama koleksi transactions sesuai nama koleksi di database Anda
-            localField: 'uangID',
-            foreignField: '_id',
-            as: 'transactionData',
+            from: "transactions", // Ganti dengan nama koleksi transactions sesuai nama koleksi di database Anda
+            localField: "uangID",
+            foreignField: "_id",
+            as: "transactionData",
           },
         },
         {
-          $unwind: '$transactionData',  // Memisahkan dokumen yang digabungkan
+          $unwind: "$transactionData", // Memisahkan dokumen yang digabungkan
         },
         {
           $group: {
             _id: null,
-            total_nominal_donasi_uang: { $sum: '$transactionData.donation_amount' },
+            total_nominal_donasi_uang: {
+              $sum: "$transactionData.donation_amount",
+            },
           },
         },
       ]).exec();
-  
+
       res.json(result);
     } catch (error) {
       console.error(error);

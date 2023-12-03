@@ -8,7 +8,7 @@ router.get("/", (req, res) => {
       <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta http-equiv="refresh" content="5;url=http://localhost:5173/halaman-donasi/donasi-uang/payment"> <!-- Tambahkan baris ini -->
+        <meta http-equiv="refresh" content="5;url=https://fs22-finalproject.netlify.app/halaman-donasi/donasi-uang/payment"> <!-- Tambahkan baris ini -->
         <title>Donasi Berhasil</title>
         <style>
           body {
