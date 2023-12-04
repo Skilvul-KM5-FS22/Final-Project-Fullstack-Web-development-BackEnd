@@ -38,9 +38,9 @@ const generateOrderId = (userId) => {
   return `${dd}${mm}${yyyy}${hours}${minutes}${seconds}${userId.slice(-4)}`;
 };
 
-const scheduleCronJob = async (savedUang) => {
+const scheduleCronJob = async (savedUang, userId) => {
   try {
-    const cronJob = cron.schedule("*/30 * * * * *", async () => {
+    const cronJob = cron.schedule("*/30 * * * *", async () => {
       console.log("Cron job is running...");
       try {
         const updatedTransactionStatus = await getTransactionStatusFromMidtrans(savedUang.order_id);
@@ -59,10 +59,21 @@ const scheduleCronJob = async (savedUang) => {
 
         console.log(`Transaction status updated: ${savedUang.transaction_status}`);
 
-        // Stop the cron job if the transaction is complete
+        // Save Donasi document only if the transaction is complete
         if (updatedTransactionStatus.transaction_status === 'capture' || updatedTransactionStatus.transaction_status === 'settlement') {
+          console.log('Transaction is complete, saving Donasi document...');
+          
+          const donasi = new Donasi({
+            uangID: savedUang._id,
+            userID: userId,
+          });
+
+          const savedDonasi = await donasi.save();
+
+          console.log('Donasi document saved:', savedDonasi);
+
           cronJob.stop();
-          console.log('Transaction is complete, stopping cron job.');
+          console.log('Cron job stopped.');
         }
       } catch (transactionError) {
         console.error("Error updating transaction status:", transactionError.message);
@@ -282,17 +293,8 @@ module.exports = {
 
       console.log("Berhasil menyimpan data donasi uang:", savedUang);
 
-      const donasi = new Donasi({
-        uangID: savedUang._id,
-        userID: id,
-      });
-
-      const savedDonasi = await donasi.save();
-
-      console.log("Transaction ID:", transaction.transaction_id);
-
       console.log("Before scheduling cron job...");
-      await scheduleCronJob(savedUang);
+      await scheduleCronJob(savedUang, id); // Pass the user ID to scheduleCronJob
 
       res.status(201).json({
         success: true,
@@ -354,6 +356,97 @@ module.exports = {
     }
   },
 
+  totalDonasiVideoByUser: async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const result = await Donasi.aggregate([
+        {
+          $match: {
+            userID: mongoose.Types.ObjectId.createFromHexString(id),
+            videoID: { $exists: true, $ne: null },
+          },
+        },
+        {
+          $group: {
+            _id: "$userID",
+            total_donasi_video: { $sum: 1 },
+          },
+        },
+      ]).exec();
+
+      res.json(result);
+    } catch (error) {
+      console.error(error);
+      res.status(500).send(error.message);
+    }
+  },
+
+  totalDonasiBukuByUser: async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const result = await Donasi.aggregate([
+        {
+          $match: {
+            userID: mongoose.Types.ObjectId.createFromHexString(id),
+            bookID: { $exists: true, $ne: null },
+          },
+        },
+        {
+          $group: {
+            _id: "$userID",
+            total_donasi_buku: { $sum: 1 },
+          },
+        },
+      ]).exec();
+
+      res.json(result);
+    } catch (error) {
+      console.error(error);
+      res.status(500).send(error.message);
+    }
+  },
+
+  totalDonasiUangByUser: async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const result = await Donasi.aggregate([
+        {
+          $match: {
+            userID: mongoose.Types.ObjectId.createFromHexString(id),
+            uangID: { $exists: true, $ne: null },
+          },
+        },
+        {
+          $lookup: {
+            from: "transactions", 
+            localField: "uangID",
+            foreignField: "_id",
+            as: "transactionData",
+          },
+        },
+        {
+          $unwind: "$transactionData",
+        },
+        {
+          $group: {
+            _id: "$userID",
+            total_donasi_uang: { 
+              $sum: "$transactionData.donation_amount",
+            },
+          },
+        },
+      ]).exec();
+
+      res.json(result);
+    } catch (error) {
+      console.error(error);
+      res.status(500).send(error.message);
+    }
+  },
+
   totalDonasiVideo: async (req, res) => {
     try {
       const result = await Donasi.aggregate([
@@ -376,6 +469,7 @@ module.exports = {
       res.status(500).send(error.message);
     }
   },
+
   totalDonasiBuku: async (req, res) => {
     try {
       const result = await Donasi.aggregate([
@@ -409,7 +503,7 @@ module.exports = {
         },
         {
           $lookup: {
-            from: "transactions", // Ganti dengan nama koleksi transactions sesuai nama koleksi di database Anda
+            from: "transactions", 
             localField: "uangID",
             foreignField: "_id",
             as: "transactionData",
@@ -425,6 +519,247 @@ module.exports = {
               $sum: "$transactionData.donation_amount",
             },
           },
+        },
+      ]).exec();
+
+      res.json(result);
+    } catch (error) {
+      console.error(error);
+      res.status(500).send(error.message);
+    }
+  },
+
+topDonasiVideoUsers: async (req, res) => {
+    try {
+      const result = await Donasi.aggregate([
+        {
+          $match: {
+            videoID: { $exists: true, $ne: null },
+          },
+        },
+        {
+          $group: {
+            _id: "$userID",
+            total_donasi_video: { $sum: 1 },
+          },
+        },
+        {
+          $lookup: {
+            from: "users", 
+            localField: "_id",
+            foreignField: "_id",
+            as: "user_info",
+          },
+        },
+        {
+          $unwind: "$user_info",
+        },
+        {
+          $project: {
+            _id: 1,
+            total_donasi_video: 1,
+            nama: "$user_info.nama", 
+            profileImage: "$user_info.profileImage",
+          },
+        },
+        {
+          $sort: {
+            total_donasi_video: -1,
+          },
+        },
+        {
+          $limit: 5,
+        },
+      ]).exec();
+
+      res.json(result);
+    } catch (error) {
+      console.error(error);
+      res.status(500).send(error.message);
+    }
+  },
+
+topDonasiBukuUsers: async (req, res) => {
+    try {
+      const result = await Donasi.aggregate([
+        {
+          $match: {
+            bookID: { $exists: true, $ne: null },
+          },
+        },
+        {
+          $group: {
+            _id: "$userID",
+            total_donasi_buku: { $sum: 1 },
+          },
+        },
+        {
+          $lookup: {
+            from: "users", 
+            localField: "_id",
+            foreignField: "_id",
+            as: "user_info",
+          },
+        },
+        {
+          $unwind: "$user_info",
+        },
+        {
+          $project: {
+            _id: 1,
+            total_donasi_buku: 1,
+            nama: "$user_info.nama", 
+            profileImage: "$user_info.profileImage",
+          },
+        },
+        {
+          $sort: {
+            total_donasi_buku: -1,
+          },
+        },
+        {
+          $limit: 5,
+        },
+      ]).exec();
+
+      res.json(result);
+    } catch (error) {
+      console.error(error);
+      res.status(500).send(error.message);
+    }
+  },
+
+  topDonasiUangUsers: async (req, res) => {
+    try {
+      const result = await Donasi.aggregate([
+        {
+          $match: {
+            uangID: { $exists: true, $ne: null },
+          },
+        },
+        {
+          $lookup: {
+            from: "transactions", 
+            localField: "uangID",
+            foreignField: "_id",
+            as: "transactionData",
+          },
+        },
+        {
+          $unwind: "$transactionData",
+        },
+        {
+          $group: {
+            _id: "$userID",
+            total_donasi_uang: { 
+              $sum: "$transactionData.donation_amount",
+            },
+          },
+        },
+        {
+          $lookup: {
+            from: "users", // ganti dengan nama koleksi pengguna Anda
+            localField: "_id",
+            foreignField: "_id",
+            as: "user_info",
+          },
+        },
+        {
+          $unwind: "$user_info",
+        },
+        {
+          $project: {
+            _id: 1,
+            total_donasi_uang: 1,
+            user_name: "$user_info.name", // ganti dengan nama field nama pengguna Anda
+            profile_image: "$user_info.profileImage", // ganti dengan nama field gambar profil pengguna Anda
+          },
+        },
+        {
+          $sort: {
+            total_donasi_uang: -1,
+          },
+        },
+        {
+          $limit: 5,
+        },
+      ]).exec();
+
+      res.json(result);
+    } catch (error) {
+      console.error(error);
+      res.status(500).send(error.message);
+    }
+  },
+
+  topAllDonasiUsers: async (req, res) => {
+    try {
+      const result = await Donasi.aggregate([
+        {
+          $lookup: {
+            from: "transactions", 
+            localField: "uangID",
+            foreignField: "_id",
+            as: "transactionData",
+          },
+        },
+        {
+          $unwind: {
+            path: "$transactionData",
+            preserveNullAndEmptyArrays: true
+          },
+        },
+        {
+          $group: {
+            _id: "$userID",
+            total_donasi_uang_nominal: { 
+              $sum: "$transactionData.donation_amount",
+            },
+            total_donasi_uang_count: { 
+              $sum: { $cond: [ { $ne: [ "$uangID", null ] }, 1, 0 ] }
+            },
+            total_donasi_buku: { 
+              $sum: { $cond: [ { $ne: [ "$bookID", null ] }, 1, 0 ] }
+            },
+            total_donasi_video: { 
+              $sum: { $cond: [ { $ne: [ "$videoID", null ] }, 1, 0 ] }
+            },
+          },
+        },
+        {
+          $lookup: {
+            from: "users", 
+            localField: "_id",
+            foreignField: "_id",
+            as: "user_info",
+          },
+        },
+        {
+          $unwind: "$user_info",
+        },
+        {
+          $project: {
+            _id: 1,
+            total_donasi_uang_nominal: 1,
+            total_donasi_uang_count: 1,
+            total_donasi_buku: 1,
+            total_donasi_video: 1,
+            nama: "$user_info.nama", 
+            profileImage: "$user_info.profileImage",
+          },
+        },
+        {
+          $addFields: {
+            total_all_donasi: { $add: [ "$total_donasi_uang_count", "$total_donasi_buku", "$total_donasi_video" ] }
+          },
+        },
+        {
+          $sort: {
+            total_all_donasi: -1,
+          },
+        },
+        {
+          $limit: 5,
         },
       ]).exec();
 

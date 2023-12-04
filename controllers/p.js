@@ -39,13 +39,13 @@ const createTransactionParameters = (orderId, amount, fullName, email, phone) =>
   
   const scheduleCronJob = async (savedUang) => {
     try {
-      const cronJob = await cron.schedule("*/30 * * * * *", async () => {
+      const cronJob = cron.schedule("*/30 * * * *", async () => {
         console.log("Cron job is running...");
         try {
-          const updatedTransactionStatus = await getTransactionStatusFromMidtrans(savedUang.transaction_id);
+          const updatedTransactionStatus = await getTransactionStatusFromMidtrans(savedUang.order_id);
           console.log("Updated transaction status from Midtrans:", updatedTransactionStatus);
   
-          savedUang.transaction_status = updatedTransactionStatus.status;
+          savedUang.transaction_status = updatedTransactionStatus.transaction_status;
           savedUang.previous_transaction_id = savedUang.transaction_id;
           savedUang.transaction_id = updatedTransactionStatus.transaction_id;
           let now = new Date();
@@ -57,6 +57,12 @@ const createTransactionParameters = (orderId, amount, fullName, email, phone) =>
           await savedUang.save();
   
           console.log(`Transaction status updated: ${savedUang.transaction_status}`);
+  
+          // Stop the cron job if the transaction is complete
+          if (updatedTransactionStatus.transaction_status === 'capture' || updatedTransactionStatus.transaction_status === 'settlement') {
+            cronJob.stop();
+            console.log('Transaction is complete, stopping cron job.');
+          }
         } catch (transactionError) {
           console.error("Error updating transaction status:", transactionError.message);
         }

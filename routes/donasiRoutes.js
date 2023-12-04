@@ -4,9 +4,16 @@ const {
   donasiBuku,
   donasiUang,
   totalDonasiByUser,
+  totalDonasiVideoByUser,
+  totalDonasiBukuByUser,
+  totalDonasiUangByUser,
   totalDonasiVideo,
   totalDonasiBuku,
   totalDonasiUang,
+  topDonasiVideoUsers,
+  topDonasiBukuUsers,
+  topDonasiUangUsers,
+  topAllDonasiUsers,
 } = require("../controllers/donasi.controllers");
 const upload = require("../utils/multer");
 const route = express.Router();
@@ -60,8 +67,15 @@ route.post("/donasiuang/:id", async (req, res) => {
 
 // Rute untuk total donasi by user
 route.get("/total-donasi/:id", totalDonasiByUser);
+route.get("/total-donasi-videos/:id", totalDonasiVideoByUser);
+route.get("/total-donasi-buku/:id", totalDonasiBukuByUser);
+route.get("/total-donasi-uang/:id", totalDonasiUangByUser);
 route.get("/all-donasi-videos", totalDonasiVideo);
 route.get("/all-donasi-buku", totalDonasiBuku);
 route.get("/all-donasi-uang", totalDonasiUang);
+route.get("/top-donasi-videos", topDonasiVideoUsers);
+route.get("/top-donasi-buku", topDonasiBukuUsers);
+route.get("/top-donasi-uang", topDonasiUangUsers);
+route.get("/top-all-donasi", topAllDonasiUsers);
 
 module.exports = route;
