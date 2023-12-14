@@ -14,6 +14,7 @@ const {
   topDonasiBukuUsers,
   topDonasiUangUsers,
   topAllDonasiUsers,
+  detailDonasiUang
 } = require("../controllers/donasi.controllers");
 const upload = require("../utils/multer");
 const route = express.Router();
@@ -77,5 +78,6 @@ route.get("/top-donasi-videos", topDonasiVideoUsers);
 route.get("/top-donasi-buku", topDonasiBukuUsers);
 route.get("/top-donasi-uang", topDonasiUangUsers);
 route.get("/top-all-donasi", topAllDonasiUsers);
+route.get("/detail-uang/:id", detailDonasiUang);
 
 module.exports = route;

@@ -2,6 +2,7 @@ const Video = require("../models/video");
 const Buku = require("../models/buku");
 const Uang = require("../models/midtrans");
 const Donasi = require("../models/donasi");
+const Transaction = require("../models/midtrans")
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const cloudinary = require("../utils/cloudinary");
 // const upload = require("../utils/multer");
@@ -40,7 +41,7 @@ const generateOrderId = (userId) => {
 
 const scheduleCronJob = async (savedUang, userId) => {
   try {
-    const cronJob = cron.schedule("*/30 * * * *", async () => {
+    const cronJob = cron.schedule("*/10 * * * * *", async () => {
       console.log("Cron job is running...");
       try {
         const updatedTransactionStatus = await getTransactionStatusFromMidtrans(savedUang.order_id);
@@ -62,7 +63,13 @@ const scheduleCronJob = async (savedUang, userId) => {
         // Save Donasi document only if the transaction is complete
         if (updatedTransactionStatus.transaction_status === 'capture' || updatedTransactionStatus.transaction_status === 'settlement') {
           console.log('Transaction is complete, saving Donasi document...');
-          
+
+          // Update the transaction_status to "Success"
+          savedUang.transaction_status = 'Success';
+          await savedUang.save();
+
+          console.log(`Transaction status updated to "Success": ${savedUang.transaction_status}`);
+
           const donasi = new Donasi({
             uangID: savedUang._id,
             userID: userId,
@@ -285,7 +292,7 @@ module.exports = {
         donation_amount,
         note,
         transaction_id: transaction.transaction_id,
-        transaction_status: "Butuh update",
+        transaction_status: "Pending",
         donaturId: id,
       });
 
@@ -334,7 +341,7 @@ module.exports = {
   totalDonasiByUser: async (req, res) => {
     try {
       const { id } = req.params;
-
+  
       const result = await Donasi.aggregate([
         {
           $match: {
@@ -345,16 +352,26 @@ module.exports = {
           $group: {
             _id: "$userID",
             total_donasi: { $sum: 1 },
+            total_donasi_buku: {
+              $sum: { $cond: [{ $gt: ["$bookID", null] }, 1, 0] },
+            },
+            total_donasi_video: {
+              $sum: { $cond: [{ $gt: ["$videoID", null] }, 1, 0] },
+            },
+            total_donasi_uang: {
+              $sum: { $cond: [{ $gt: ["$uangID", null] }, 1, 0] },
+            },
           },
         },
+        
       ]).exec();
-
+  
       res.json(result);
     } catch (error) {
       console.error(error);
       res.status(500).send(error.message);
     }
-  },
+  },  
 
   totalDonasiVideoByUser: async (req, res) => {
     try {
@@ -436,6 +453,7 @@ module.exports = {
             total_donasi_uang: { 
               $sum: "$transactionData.donation_amount",
             },
+            jumlah_donasi: { $sum: 1 },
           },
         },
       ]).exec();
@@ -658,7 +676,7 @@ topDonasiBukuUsers: async (req, res) => {
         },
         {
           $lookup: {
-            from: "users", // ganti dengan nama koleksi pengguna Anda
+            from: "users", 
             localField: "_id",
             foreignField: "_id",
             as: "user_info",
@@ -671,8 +689,8 @@ topDonasiBukuUsers: async (req, res) => {
           $project: {
             _id: 1,
             total_donasi_uang: 1,
-            user_name: "$user_info.name", // ganti dengan nama field nama pengguna Anda
-            profile_image: "$user_info.profileImage", // ganti dengan nama field gambar profil pengguna Anda
+            nama: "$user_info.nama", 
+            profile_image: "$user_info.profileImage", 
           },
         },
         {
@@ -696,39 +714,14 @@ topDonasiBukuUsers: async (req, res) => {
     try {
       const result = await Donasi.aggregate([
         {
-          $lookup: {
-            from: "transactions", 
-            localField: "uangID",
-            foreignField: "_id",
-            as: "transactionData",
-          },
-        },
-        {
-          $unwind: {
-            path: "$transactionData",
-            preserveNullAndEmptyArrays: true
-          },
-        },
-        {
           $group: {
             _id: "$userID",
-            total_donasi_uang_nominal: { 
-              $sum: "$transactionData.donation_amount",
-            },
-            total_donasi_uang_count: { 
-              $sum: { $cond: [ { $ne: [ "$uangID", null ] }, 1, 0 ] }
-            },
-            total_donasi_buku: { 
-              $sum: { $cond: [ { $ne: [ "$bookID", null ] }, 1, 0 ] }
-            },
-            total_donasi_video: { 
-              $sum: { $cond: [ { $ne: [ "$videoID", null ] }, 1, 0 ] }
-            },
+            total_donasi: { $sum: 1 },
           },
         },
         {
           $lookup: {
-            from: "users", 
+            from: "users",
             localField: "_id",
             foreignField: "_id",
             as: "user_info",
@@ -740,33 +733,55 @@ topDonasiBukuUsers: async (req, res) => {
         {
           $project: {
             _id: 1,
-            total_donasi_uang_nominal: 1,
-            total_donasi_uang_count: 1,
-            total_donasi_buku: 1,
-            total_donasi_video: 1,
-            nama: "$user_info.nama", 
+            total_donasi: 1,
+            nama: "$user_info.nama",
             profileImage: "$user_info.profileImage",
           },
         },
         {
-          $addFields: {
-            total_all_donasi: { $add: [ "$total_donasi_uang_count", "$total_donasi_buku", "$total_donasi_video" ] }
-          },
-        },
-        {
           $sort: {
-            total_all_donasi: -1,
+            total_donasi: -1,
           },
         },
         {
           $limit: 5,
         },
       ]).exec();
-
+  
       res.json(result);
     } catch (error) {
       console.error(error);
       res.status(500).send(error.message);
     }
+  },  
+
+  detailDonasiUang: async (req, res) => {
+    try {
+      const { id } = req.params;
+      
+      const details = await Transaction.aggregate([
+        {
+          $match: {
+            donaturId: mongoose.Types.ObjectId.createFromHexString(id),
+            // Add any additional conditions based on your requirements
+          },
+        },
+        {
+          $project: {
+            orderId: "$order_id",
+            tanggal: "$last_updated_at", // Use the last_updated_at field or createdAt if it is available
+            nominal: "$donation_amount",
+            status: "$transaction_status",
+          },
+        },
+      ]).exec();
+  
+      res.json(details);
+    } catch (error) {
+      console.error(error);
+      res.status(500).send(error.message);
+    }
   },
+  
+  
 };
