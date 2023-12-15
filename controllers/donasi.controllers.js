@@ -2,15 +2,27 @@ const Video = require("../models/video");
 const Buku = require("../models/buku");
 const Uang = require("../models/midtrans");
 const Donasi = require("../models/donasi");
-const Transaction = require("../models/midtrans")
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const Transaction = require("../models/midtrans");
+const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const cloudinary = require("../utils/cloudinary");
 // const upload = require("../utils/multer");
 const mongoose = require("mongoose");
 const cron = require("node-cron");
 const midtransClient = require("midtrans-client");
 
-const createTransactionParameters = (orderId, amount, fullName, email, phone) => {
+const createTransactionParameters = (
+  orderId,
+  amount,
+  fullName,
+  email,
+  phone
+) => {
+  let now = new Date();
+  let createdTime = now.toLocaleString("id-ID", {
+    timeZone: "Asia/Jakarta",
+    hour12: false,
+  });
+
   return {
     transaction_details: {
       order_id: orderId,
@@ -24,6 +36,16 @@ const createTransactionParameters = (orderId, amount, fullName, email, phone) =>
       email,
       phone,
     },
+    item_details: [
+      {
+        id: orderId,
+        price: amount,
+        quantity: 1,
+        name: "Donation",
+      },
+    ],
+    custom_field1: "Donation Note",
+    custom_field2: createdTime,
   };
 };
 
@@ -44,31 +66,66 @@ const scheduleCronJob = async (savedUang, userId) => {
     const cronJob = cron.schedule("*/10 * * * * *", async () => {
       console.log("Cron job is running...");
       try {
-        const updatedTransactionStatus = await getTransactionStatusFromMidtrans(savedUang.order_id);
-        console.log("Updated transaction status from Midtrans:", updatedTransactionStatus);
+        const updatedTransactionStatus = await getTransactionStatusFromMidtrans(
+          savedUang.order_id
+        );
 
-        savedUang.transaction_status = updatedTransactionStatus.transaction_status;
+        savedUang.transaction_status =
+          updatedTransactionStatus.transaction_status;
         savedUang.previous_transaction_id = savedUang.transaction_id;
         savedUang.transaction_id = updatedTransactionStatus.transaction_id;
+        savedUang.payment_type = updatedTransactionStatus.payment_type;
+        savedUang.bank = updatedTransactionStatus.bank;
+        savedUang.va_numbers = updatedTransactionStatus.va_numbers;
+        savedUang.store = updatedTransactionStatus.store;
+        savedUang.issuer = updatedTransactionStatus.issuer;
+        savedUang.acquirer = updatedTransactionStatus.acquirer;
+        savedUang.gross_amount = updatedTransactionStatus.gross_amount;
+
         let now = new Date();
         savedUang.last_updated_at = now.toLocaleString("id-ID", {
           timeZone: "Asia/Jakarta",
           hour12: false,
+          weekday: "short",
+          day: "2-digit",
+          month: "short",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
         });
 
         await savedUang.save();
 
-        console.log(`Transaction status updated: ${savedUang.transaction_status}`);
+        console.log(
+          `Transaction status updated: ${savedUang.transaction_status}`
+        );
 
-        // Save Donasi document only if the transaction is complete
-        if (updatedTransactionStatus.transaction_status === 'capture' || updatedTransactionStatus.transaction_status === 'settlement') {
-          console.log('Transaction is complete, saving Donasi document...');
+        if (
+          updatedTransactionStatus.transaction_status === "capture" ||
+          updatedTransactionStatus.transaction_status === "settlement"
+        ) {
+          console.log("Transaction is complete, saving Donasi document...");
 
-          // Update the transaction_status to "Success"
-          savedUang.transaction_status = 'Success';
+          savedUang.transaction_status = "Success";
+          savedUang.success_at = now.toLocaleString("id-ID", {
+            timeZone: "Asia/Jakarta",
+            hour12: false,
+            weekday: "short",
+            day: "2-digit",
+            month: "short",
+            year: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+
           await savedUang.save();
 
-          console.log(`Transaction status updated to "Success": ${savedUang.transaction_status}`);
+          console.log(
+            `Transaction status updated to "Success": ${savedUang.transaction_status}`
+          );
+
+          // Handle settlement details through your webhook endpoint
+          // No direct synchronous method for fetching settlement details
 
           const donasi = new Donasi({
             uangID: savedUang._id,
@@ -77,19 +134,23 @@ const scheduleCronJob = async (savedUang, userId) => {
 
           const savedDonasi = await donasi.save();
 
-          console.log('Donasi document saved:', savedDonasi);
+          console.log("Donasi document saved:", savedDonasi);
 
           cronJob.stop();
-          console.log('Cron job stopped.');
+          console.log("Cron job stopped.");
         }
       } catch (transactionError) {
-        console.error("Error updating transaction status:", transactionError.message);
+        console.error(
+          "Error updating transaction status:",
+          transactionError.message
+        );
       }
     });
   } catch (cronError) {
     console.error("Error scheduling cron job:", cronError.message);
   }
 };
+
 
 // Controller untuk mendapatkan status transaksi dari Midtrans
 const getTransactionStatusFromMidtrans = async (order_id) => {
@@ -100,9 +161,42 @@ const getTransactionStatusFromMidtrans = async (order_id) => {
 
   try {
     const transactionStatus = await core.transaction.status(order_id);
-    return transactionStatus;
+    return {
+      transaction_status: transactionStatus.transaction_status,
+      transaction_id: transactionStatus.transaction_id,
+      payment_type: transactionStatus.payment_type,
+      bank: transactionStatus.bank ? transactionStatus.bank : null,
+      va_numbers: transactionStatus.va_numbers
+        ? transactionStatus.va_numbers
+        : null,
+      store: transactionStatus.store ? transactionStatus.store : null,
+      issuer: transactionStatus.issuer ? transactionStatus.issuer : null,
+      acquirer: transactionStatus.acquirer ? transactionStatus.acquirer : null,
+      gross_amount: transactionStatus.gross_amount,
+    };
   } catch (error) {
-    console.error("Error getting transaction status from Midtrans:", error.message);
+    console.error(
+      "Error getting transaction status from Midtrans:",
+      error.message
+    );
+    throw error;
+  }
+};
+
+const getSettlementInfoFromMidtrans = async (transactionId) => {
+  let core = new midtransClient.CoreApi({
+    isProduction: false,
+    serverKey: process.env.SERVER_KEY,
+  });
+
+  try {
+    const settlementInfo = await core.transaction.settlement(transactionId);
+    return settlementInfo;
+  } catch (error) {
+    console.error(
+      "Error getting settlement information from Midtrans:",
+      error.message
+    );
     throw error;
   }
 };
@@ -192,19 +286,23 @@ module.exports = {
       const imgKey = Math.round(Math.random() * 99999999999999).toString();
 
       // Promises for book and image uploads
-      const uploadBookPromise = s3Client.send(new PutObjectCommand({
-        Bucket: process.env.R2_BUCKET_NAME,
-        Key: bookKey,
-        Body: req.files.book_url[0].buffer,
-        ContentType: req.files.book_url[0].mimetype,
-      }));
+      const uploadBookPromise = s3Client.send(
+        new PutObjectCommand({
+          Bucket: process.env.R2_BUCKET_NAME,
+          Key: bookKey,
+          Body: req.files.book_url[0].buffer,
+          ContentType: req.files.book_url[0].mimetype,
+        })
+      );
 
-      const uploadImgPromise = s3Client.send(new PutObjectCommand({
-        Bucket: process.env.R2_BUCKET_NAME,
-        Key: imgKey,
-        Body: req.files.img_url[0].buffer,
-        ContentType: req.files.img_url[0].mimetype,
-      }));
+      const uploadImgPromise = s3Client.send(
+        new PutObjectCommand({
+          Bucket: process.env.R2_BUCKET_NAME,
+          Key: imgKey,
+          Body: req.files.img_url[0].buffer,
+          ContentType: req.files.img_url[0].mimetype,
+        })
+      );
 
       // Wait for both uploads to complete
       const [bookUploadResult, imgUploadResult] = await Promise.all([
@@ -259,8 +357,6 @@ module.exports = {
       });
     }
   },
-  
-
   donasiUang: async (req, res) => {
     try {
       const { id } = req.params;
@@ -280,9 +376,17 @@ module.exports = {
         serverKey: process.env.SERVER_KEY,
       });
 
-      let parameter = createTransactionParameters(orderId, donation_amount, full_name, email, phone);
+      let parameter = createTransactionParameters(
+        orderId,
+        donation_amount,
+        full_name,
+        email,
+        phone
+      );
 
       const transaction = await snap.createTransaction(parameter);
+
+      const now = new Date();
 
       const uang = new Uang({
         order_id: parameter.transaction_details.order_id,
@@ -294,6 +398,15 @@ module.exports = {
         transaction_id: transaction.transaction_id,
         transaction_status: "Pending",
         donaturId: id,
+        created_at: now.toLocaleString("id-ID", {
+          timeZone: "Asia/Jakarta",
+          weekday: "short",
+          day: "2-digit",
+          month: "short",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
       });
 
       const savedUang = await uang.save();
@@ -325,7 +438,9 @@ module.exports = {
         });
       }
 
-      const transactionStatus = await getTransactionStatusFromMidtrans(order_id);
+      const transactionStatus = await getTransactionStatusFromMidtrans(
+        order_id
+      );
 
       res.status(200).json({
         success: true,
@@ -341,7 +456,7 @@ module.exports = {
   totalDonasiByUser: async (req, res) => {
     try {
       const { id } = req.params;
-  
+
       const result = await Donasi.aggregate([
         {
           $match: {
@@ -363,15 +478,14 @@ module.exports = {
             },
           },
         },
-        
       ]).exec();
-  
+
       res.json(result);
     } catch (error) {
       console.error(error);
       res.status(500).send(error.message);
     }
-  },  
+  },
 
   totalDonasiVideoByUser: async (req, res) => {
     try {
@@ -438,7 +552,7 @@ module.exports = {
         },
         {
           $lookup: {
-            from: "transactions", 
+            from: "transactions",
             localField: "uangID",
             foreignField: "_id",
             as: "transactionData",
@@ -450,7 +564,7 @@ module.exports = {
         {
           $group: {
             _id: "$userID",
-            total_donasi_uang: { 
+            total_donasi_uang: {
               $sum: "$transactionData.donation_amount",
             },
             jumlah_donasi: { $sum: 1 },
@@ -521,7 +635,7 @@ module.exports = {
         },
         {
           $lookup: {
-            from: "transactions", 
+            from: "transactions",
             localField: "uangID",
             foreignField: "_id",
             as: "transactionData",
@@ -547,7 +661,7 @@ module.exports = {
     }
   },
 
-topDonasiVideoUsers: async (req, res) => {
+  topDonasiVideoUsers: async (req, res) => {
     try {
       const result = await Donasi.aggregate([
         {
@@ -563,7 +677,7 @@ topDonasiVideoUsers: async (req, res) => {
         },
         {
           $lookup: {
-            from: "users", 
+            from: "users",
             localField: "_id",
             foreignField: "_id",
             as: "user_info",
@@ -576,7 +690,7 @@ topDonasiVideoUsers: async (req, res) => {
           $project: {
             _id: 1,
             total_donasi_video: 1,
-            nama: "$user_info.nama", 
+            nama: "$user_info.nama",
             profileImage: "$user_info.profileImage",
           },
         },
@@ -597,7 +711,7 @@ topDonasiVideoUsers: async (req, res) => {
     }
   },
 
-topDonasiBukuUsers: async (req, res) => {
+  topDonasiBukuUsers: async (req, res) => {
     try {
       const result = await Donasi.aggregate([
         {
@@ -613,7 +727,7 @@ topDonasiBukuUsers: async (req, res) => {
         },
         {
           $lookup: {
-            from: "users", 
+            from: "users",
             localField: "_id",
             foreignField: "_id",
             as: "user_info",
@@ -626,7 +740,7 @@ topDonasiBukuUsers: async (req, res) => {
           $project: {
             _id: 1,
             total_donasi_buku: 1,
-            nama: "$user_info.nama", 
+            nama: "$user_info.nama",
             profileImage: "$user_info.profileImage",
           },
         },
@@ -657,7 +771,7 @@ topDonasiBukuUsers: async (req, res) => {
         },
         {
           $lookup: {
-            from: "transactions", 
+            from: "transactions",
             localField: "uangID",
             foreignField: "_id",
             as: "transactionData",
@@ -669,14 +783,14 @@ topDonasiBukuUsers: async (req, res) => {
         {
           $group: {
             _id: "$userID",
-            total_donasi_uang: { 
+            total_donasi_uang: {
               $sum: "$transactionData.donation_amount",
             },
           },
         },
         {
           $lookup: {
-            from: "users", 
+            from: "users",
             localField: "_id",
             foreignField: "_id",
             as: "user_info",
@@ -689,8 +803,8 @@ topDonasiBukuUsers: async (req, res) => {
           $project: {
             _id: 1,
             total_donasi_uang: 1,
-            nama: "$user_info.nama", 
-            profile_image: "$user_info.profileImage", 
+            nama: "$user_info.nama",
+            profile_image: "$user_info.profileImage",
           },
         },
         {
@@ -747,18 +861,18 @@ topDonasiBukuUsers: async (req, res) => {
           $limit: 5,
         },
       ]).exec();
-  
+
       res.json(result);
     } catch (error) {
       console.error(error);
       res.status(500).send(error.message);
     }
-  },  
+  },
 
   detailDonasiUang: async (req, res) => {
     try {
       const { id } = req.params;
-      
+
       const details = await Transaction.aggregate([
         {
           $match: {
@@ -769,19 +883,243 @@ topDonasiBukuUsers: async (req, res) => {
         {
           $project: {
             orderId: "$order_id",
-            tanggal: "$last_updated_at", // Use the last_updated_at field or createdAt if it is available
+            tanggal: { $ifNull: ["$success_at", "$created_at"]},
             nominal: "$donation_amount",
             status: "$transaction_status",
+            metode_pembayaran: {
+              $cond: {
+                if: { $eq: ["$payment_type", "cstore"] },
+                then: "$store",
+                else: {
+                  $cond: {
+                    if: { $eq: ["$payment_type", "bank_transfer"] },
+                    then: { $arrayElemAt: ["$va_numbers.bank", 0] },
+                    else: {
+                      $cond: {
+                        if: { $eq: ["$payment_type", "qris"] },
+                        then: {
+                          $cond: {
+                            if: { $ne: ["$issuer", null] },
+                            then: "$issuer",
+                            else: {
+                              $cond: {
+                                if: { $ne: ["$acquirer", null] },
+                                then: "$acquirer",
+                                else: "Unknown Acquirer",
+                              },
+                            },
+                          },
+                        },
+                        else: {
+                          $cond: {
+                            if: { $eq: ["$payment_type", "gopay"] },
+                            then: {
+                              $cond: {
+                                if: { $ne: ["$acquirer", null] },
+                                then: "$acquirer",
+                                else: "Unknown Acquirer",
+                              },
+                            },
+                            else: "$payment_type",
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            logo_metode_pembayaran: {
+              $cond: {
+                if: { $eq: ["$payment_type", "akulaku"] },
+                then: `${process.env.BANK_LOGO}/akulaku_paylater.png`,
+                else: {
+                  $cond: {
+                    if: { $eq: ["$store", "alfamart"] },
+                    then: `${process.env.BANK_LOGO}/alfamart.png`,
+                    else: {
+                      $cond: {
+                        if: { $eq: ["$store", "indomaret"] },
+                        then: `${process.env.BANK_LOGO}/indomaret.png`,
+                        else: {
+                          $cond: {
+                            if: { $eq: ["$payment_type", "qris"] },
+                            then: {
+                              $cond: {
+                                if: { $eq: ["$issuer", "gopay"] },
+                                then: `${process.env.BANK_LOGO}/gopay_landscape.png`,
+                                else: {
+                                  $cond: {
+                                    if: { $eq: ["$issuer", "dana"] },
+                                    then: `${process.env.BANK_LOGO}/Dana.png`,
+                                    else: {
+                                      $cond: {
+                                        if: {
+                                          $eq: ["$issuer", "airpay shopee"],
+                                        },
+                                        then: `${process.env.BANK_LOGO}/shopeepay_qris_1.png`,
+                                        else: {
+                                          $cond: {
+                                            if: { $eq: ["$issuer", "ovo"] },
+                                            then: `${process.env.BANK_LOGO}/OVO.png`,
+                                            else: {
+                                              $cond: {
+                                                if: {
+                                                  $eq: ["$issuer", "tcash"],
+                                                },
+                                                then: `${process.env.BANK_LOGO}/Tcash.png`,
+                                                else: {
+                                                  $cond: {
+                                                    if: {
+                                                      $eq: [
+                                                        "$acquirer",
+                                                        "airpay shopee",
+                                                      ],
+                                                    },
+                                                    then: `${process.env.BANK_LOGO}/shopeepay.png`,
+                                                    else: `${process.env.BANK_LOGO}/qris.png`,
+                                                  },
+                                                },
+                                              },
+                                            },
+                                          },
+                                        },
+                                      },
+                                    },
+                                  },
+                                },
+                              },
+                            },
+                            else: {
+                              $cond: {
+                                if: { $eq: ["$payment_type", "bank_transfer"] },
+                                then: {
+                                  $cond: {
+                                    if: {
+                                      $eq: [
+                                        {
+                                          $arrayElemAt: ["$va_numbers.bank", 0],
+                                        },
+                                        "bca",
+                                      ],
+                                    },
+                                    then: `${process.env.BANK_LOGO}/bca.png`,
+                                    else: {
+                                      $cond: {
+                                        if: {
+                                          $eq: [
+                                            {
+                                              $arrayElemAt: [
+                                                "$va_numbers.bank",
+                                                0,
+                                              ],
+                                            },
+                                            "bri",
+                                          ],
+                                        },
+                                        then: `${process.env.BANK_LOGO}/bri.png`,
+                                        else: {
+                                          $cond: {
+                                            if: {
+                                              $eq: [
+                                                {
+                                                  $arrayElemAt: [
+                                                    "$va_numbers.bank",
+                                                    0,
+                                                  ],
+                                                },
+                                                "bni",
+                                              ],
+                                            },
+                                            then: `${process.env.BANK_LOGO}/bni.png`,
+                                            else: {
+                                              $cond: {
+                                                if: {
+                                                  $eq: [
+                                                    {
+                                                      $arrayElemAt: [
+                                                        "$va_numbers.bank",
+                                                        0,
+                                                      ],
+                                                    },
+                                                    "permata",
+                                                  ],
+                                                },
+                                                then: `${process.env.BANK_LOGO}/permata_bank.png`,
+                                                else: {
+                                                  $cond: {
+                                                    if: {
+                                                      $eq: [
+                                                        {
+                                                          $arrayElemAt: [
+                                                            "$va_numbers.bank",
+                                                            0,
+                                                          ],
+                                                        },
+                                                        "cimb",
+                                                      ],
+                                                    },
+                                                    then: `${process.env.BANK_LOGO}/cimbniaga.png`,
+                                                    else: {
+                                                      $cond: {
+                                                        if: {
+                                                          $eq: [
+                                                            {
+                                                              $arrayElemAt: [
+                                                                "$va_numbers.bank",
+                                                                0,
+                                                              ],
+                                                            },
+                                                            "mandiri",
+                                                          ],
+                                                        },
+                                                        then: `${process.env.BANK_LOGO}/mandiri.png`,
+                                                        else: "URL_LOGO_DEFAULT",
+                                                      },
+                                                    },
+                                                  },
+                                                },
+                                              },
+                                            },
+                                          },
+                                        },
+                                      },
+                                    },
+                                  },
+                                },
+                                else: {
+                                  $cond: {
+                                    if: {
+                                      $eq: ["$payment_type", "credit_card"],
+                                    },
+                                    then: {
+                                      $cond: {
+                                        if: { $eq: ["$bank", "mega"] },
+                                        then: `${process.env.BANK_LOGO}/bank_mega.png`,
+                                        else: "URL_LOGO_DEFAULT",
+                                      },
+                                    },
+                                    else: `${process.env.BANK_LOGO}/bank_transfer_network_atm_bersama.png`,
+                                  },
+                                },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
           },
         },
       ]).exec();
-  
+
       res.json(details);
     } catch (error) {
       console.error(error);
       res.status(500).send(error.message);
     }
   },
-  
-  
 };

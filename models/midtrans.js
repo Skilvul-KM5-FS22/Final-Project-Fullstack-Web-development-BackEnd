@@ -26,6 +26,24 @@ const transactionSchema = new mongoose.Schema({
   note: {
     type: String,
   },
+  payment_type: {
+    type: String,
+  },
+  bank: {
+    type: String,
+  },
+  va_numbers: [{
+    type: Object,
+  }],
+  store: {
+    type: String,
+  },
+  issuer: {
+    type: String,
+  },
+  acquirer: {
+    type: String,
+  },
   response_midtrans: {
     type: String,
   },
@@ -33,6 +51,12 @@ const transactionSchema = new mongoose.Schema({
     type: String,
   },
   previous_transaction_id: {
+    type: String,
+  },
+  created_at: {
+    type: String,
+  },
+  success_at: {
     type: String,
   },
   last_updated_at: {
