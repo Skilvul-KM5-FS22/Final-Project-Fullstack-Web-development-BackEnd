@@ -883,6 +883,7 @@ module.exports = {
         {
           $project: {
             orderId: "$order_id",
+            nama: "$full_name",
             tanggal: { $ifNull: ["$success_at", "$created_at"]},
             nominal: "$donation_amount",
             status: "$transaction_status",
@@ -1112,6 +1113,11 @@ module.exports = {
                 },
               },
             },
+          },
+        },
+        {
+          $sort: {
+            tanggal: -1, // Sort in descending order based on the tanggal field
           },
         },
       ]).exec();
